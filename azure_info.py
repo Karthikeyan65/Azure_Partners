@@ -1,25 +1,25 @@
 import asyncio
 import json
+import re
 from datetime import datetime
 from playwright.async_api import async_playwright
 import requests
 from pymongo import MongoClient
 import os
 
-# Constants
 BASE_URL = "https://appsource.microsoft.com/en-us/marketplace/partner-dir"
+
+API_URL = "https://main.prod.marketplacepartnerdirectory.azure.com/api/partners"
 PAGE_SIZE = 18
 RETRY_DELAY = 30
+TIMEOUT = 60 * 1000
 MAX_RETRIES = 5
-RADIUS = 100
-MAX_PAGE_OFFSET = 90
-
-# MongoDB setup
+RADIUS = 100  
+LOCATION_NOT_REQUIRED = True  
 MONGO_URI = "mongodb://localhost:27017"
 DB_NAME = "Azure_partners_db"
-COLLECTION_NAME = "Azure_db"
+COLLECTION_NAME = "info"
 
-# Temporary file for storing processed company IDs
 TEMP_FILE = "processed_ids.txt"
 
 class AzurePartnerScraper:
@@ -28,166 +28,147 @@ class AzurePartnerScraper:
         self.db = self.client[DB_NAME]
         self.collection = self.db[COLLECTION_NAME]
         self.processed_count = 0
-        self.current_alphabet_count = 0
 
-    def get_search_url(self, alphabet, page_offset=0):
-        """Generate URL with dynamic page offset."""
-        return f"{BASE_URL}?filter=sort%3D0%3BpageSize%3D{PAGE_SIZE}%3BpageOffset%3D{page_offset}%3Bradius%3D{RADIUS}%3Bfreetext%3D{alphabet}%3Bsuggestion%3Dtrue"
-
-    async def extract_list_data(self, element, selector):
-        """Helper function to extract list data from elements."""
-        items = await element.query_selector_all(selector)
-        return [await item.text_content() for item in items] if items else []
-
-    async def search_partners(self, page, alphabet, page_offset):
-        """Search for partners using pagination and extract detailed data."""
+    async def search_appsource_alphabets(self, page, alphabet):
+        """Search AppSource using a given alphabet by modifying the URL."""
+        print(f"Initiating AppSource search for alphabet '{alphabet}' using URL...")
+        
         try:
-            search_url = self.get_search_url(alphabet, page_offset)
+            search_url = f"{BASE_URL}?filter=sort%3D0%3BpageSize%3D18%3Bradius%3D100%3Bfreetext%3D{alphabet}%3Bsuggestion%3Dtrue%3BlocationNotRequired%3Dtrue"
+
             await page.goto(search_url, timeout=60000)
-            print(f"\nProcessing alphabet '{alphabet}' - Page Offset: {page_offset}")
+
+            print(f"AppSource search for alphabet '{alphabet}' using URL executed successfully!")
             await asyncio.sleep(5)  
-            
-            partner_elements = await page.query_selector_all('.partner-card')
-            partners_data = []
-            
-            for element in partner_elements:
-                try:
-                    company_id = await element.get_attribute('id')
-                    name_element = await element.query_selector('.partner-name')
-                    desc_element = await element.query_selector('.partner-description')
-                    website_element = await element.query_selector('a.partner-website')
-                    linkedin_element = await element.query_selector('a.partner-linkedin')
-                    logo_element = await element.query_selector('img.partner-logo')
-                    
-                    industry_focus = await self.extract_list_data(element, '.industry-focus-item')
-                    products = await self.extract_list_data(element, '.product-item')
-                    services = await self.extract_list_data(element, '.service-type-item')
-                    solutions = await self.extract_list_data(element, '.solution-item')
-                    target_sizes = await self.extract_list_data(element, '.target-size-item')
-                    
-                    partner_data = {
-                        "partnerDetails": {
-                            "id": company_id,
-                            "name": await name_element.text_content() if name_element else None,
-                            "description": await desc_element.text_content() if desc_element else None,
-                            "url": await website_element.get_attribute('href') if website_element else None,
-                            "linkedInOrganizationProfile": await linkedin_element.get_attribute('href') if linkedin_element else None,
-                            "logo": await logo_element.get_attribute('src') if logo_element else None,
-                            "industryFocus": industry_focus,
-                            "product": products,
-                            "serviceType": services,
-                            "solutions": solutions,
-                            "targetCustomerCompanySizes": target_sizes
-                        }
-                    }
-                    partners_data.append(partner_data)
-                except Exception as e:
-                    print(f"Error extracting partner data: {e}")
-            
-            return partners_data, len(partner_elements) > 0
 
         except Exception as e:
-            print(f"Error during partner search for alphabet '{alphabet}' at offset {page_offset}: {e}")
-            return [], False
+            print(f"Error during AppSource search for alphabet '{alphabet}' using URL: {e}")
+
+    async def fetch_batch(self, page_offset):
+        """Fetch a batch of company IDs from the API."""
+        url = f"{API_URL}?filter=sort%3D0%3BpageSize%3D{PAGE_SIZE}%3BpageOffset%3D{page_offset}%3Bradius%3D100%3Bfreetext%3Db%3Bsuggestion%3Dtrue%3BlocationNotRequired%3Dtrue"
+        print("Fetching batch...")
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = requests.get(url, timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    company_ids = [item['partnerId'] for item in data.get('matchingPartners', {}).get('items', [])]
+                    return company_ids
+                print(f"Error {response.status_code} - Attempt {attempt + 1}/{MAX_RETRIES}")
+            except Exception as e:
+                print(f"Error fetching batch: {e} - Attempt {attempt + 1}/{MAX_RETRIES}")
+            await asyncio.sleep(RETRY_DELAY)
+        return []
 
     def process_partner_data(self, data):
         """Process and clean partner data for storage."""
         if not data:
             return None
 
-        partner_details = data.get("partnerDetails", {})
-        return {
-            "company_id": partner_details.get("id"),
-            "name": partner_details.get("name"),
-            "description": partner_details.get("description"),
-            "website": partner_details.get("url"),
-            "linkedin": partner_details.get("linkedInOrganizationProfile"),
-            "logo": partner_details.get("logo"),
-            "industry_focus": partner_details.get("industryFocus", []),
-            "products": partner_details.get("product", []),
-            "services": partner_details.get("serviceType", []),
-            "solutions": partner_details.get("solutions", []),
-            "target_company_sizes": partner_details.get("targetCustomerCompanySizes", []),
-            "last_updated": datetime.now()
+        processed_data = {
+            "company_id": data.get("partnerDetails", {}).get("id", "Not available"),  
+            "Name": data.get("partnerDetails", {}).get("name", "Not available"),
+            "Description": data.get("partnerDetails", {}).get("description", "Not available"),
+            "Website": data.get("partnerDetails", {}).get("url", "Not available"),
+            "Linkedin": data.get("partnerDetails", {}).get("linkedInOrganizationProfile", "Not available"),
+            "Industry_focus": data.get("partnerDetails", {}).get("industryFocus", "Not available"),
+            "Logo": data.get("partnerDetails", {}).get("logo", "Not available"),
+            "Products": data.get("partnerDetails", {}).get("product", "Not available"),
+            "Services": data.get("partnerDetails", {}).get("serviceType", "Not available"),
+            "Solutions": data.get("partnerDetails", {}).get("solutions", "Not available"),
+            "Target_company_sizes": data.get("partnerDetails", {}).get("targetCustomerCompanySizes", "Not available"),
+            "Last_modified": datetime.now()
         }
+        return processed_data
 
-    def check_id_in_temp_file(self, partner_id):
-        """Check if the partner has already been processed."""
+
+    async def fetch_company_details(self, company_id, alphabet):
+        """Fetch detailed information for a company using the given URL."""
+        detailed_url = f"https://appsource.microsoft.com/en-us/marketplace/partner-dir?filter=sort%3D0%3BpageSize%3D{PAGE_SIZE}%3Bradius%3D{RADIUS}%3Bfreetext%3D{alphabet}%3Bsuggestion%3Dtrue%3BlocationNotRequired%3D"
+
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = requests.get(detailed_url, timeout=30)
+                if response.status_code == 200:
+                 
+                    return response.text
+                else:
+                    print(f"Error fetching details for company {company_id}: {response.status_code} - Attempt {attempt + 1}/{MAX_RETRIES}")
+            except requests.exceptions.RequestException as e:
+                print(f"Request error for company {company_id}: {e} - Attempt {attempt + 1}/{MAX_RETRIES}")
+            await asyncio.sleep(RETRY_DELAY)  
+        return None
+
+    async def process_batch(self, company_ids, alphabet):
+        """Process a batch of company IDs and store their details in the DB."""
+        for company_id in company_ids:
+            if self.check_id_in_temp_file(company_id):
+                print(f"Company ID {company_id} already processed. Skipping...")
+                continue
+
+            try:
+                partner_data = await self.fetch_company_details(company_id, alphabet)
+                if partner_data:
+                    processed_data = self.process_partner_data({"partnerDetails": {"id": company_id, "name": "name"}})  
+                    if processed_data:
+                        self.collection.update_one(
+                            {"company_id": processed_data["company_id"]},
+                            {"$set": processed_data},
+                            upsert=True  
+                        )
+                        self.processed_count += 1
+                        print(f"Processed and stored data for company {processed_data['name']}")
+                        self.append_id_to_temp_file(company_id)
+            except Exception as e:
+                print(f"Error processing company {company_id}: {e}")
+            await asyncio.sleep(1)  
+
+    def check_id_in_temp_file(self, company_id):
+        """Check if the company ID is already in the temporary file."""
         if not os.path.exists(TEMP_FILE):
+            return False  
+    
+        try:
+            with open(TEMP_FILE, 'r') as f:
+                processed_ids = f.read().splitlines()
+        except FileNotFoundError:
             return False
         
-        with open(TEMP_FILE, 'r') as f:
-            processed_ids = f.read().splitlines()
-        return partner_id in processed_ids
+        return company_id in processed_ids
 
-    def append_id_to_temp_file(self, partner_id):
-        """Record processed partner ID."""
+    def append_id_to_temp_file(self, company_id):
+        """Append the processed company ID to the temporary file."""
         with open(TEMP_FILE, 'a') as f:
-            f.write(f"{partner_id}\n")
-
-    async def process_single_alphabet(self, page, alphabet):
-        """Process all pages for a single alphabet up to offset 90."""
-        self.current_alphabet_count = 0
-        page_offset = 0
-        
-        print(f"\n{'='*50}")
-        print(f"Starting processing for alphabet: {alphabet.upper()}")
-        print(f"{'='*50}")
-        
-        while page_offset <= MAX_PAGE_OFFSET:
-            partners_data, has_results = await self.search_partners(page, alphabet, page_offset)
-            
-            if not has_results:
-                print(f"\nNo more results for alphabet '{alphabet}' at offset {page_offset}")
-                break
-            
-            for partner_data in partners_data:
-                partner_id = partner_data.get("partnerDetails", {}).get("id")
-                
-                if self.check_id_in_temp_file(partner_id):
-                    print(f"Skipping already processed partner: {partner_id}")
-                    continue
-
-                processed_data = self.process_partner_data(partner_data)
-                if processed_data:
-                    self.collection.update_one(
-                        {"company_id": partner_id},
-                        {"$set": processed_data},
-                        upsert=True
-                    )
-                    self.processed_count += 1
-                    self.current_alphabet_count += 1
-                    self.append_id_to_temp_file(partner_id)
-                    print(f"Processed: {processed_data['name']} (ID: {partner_id})")
-                
-                await asyncio.sleep(1)  
-            
-            print(f"\nCompleted offset {page_offset} for alphabet '{alphabet}'")
-            print(f"Current alphabet progress: {self.current_alphabet_count} partners")
-            print(f"Total partners processed: {self.processed_count}")
-            
-            page_offset += PAGE_SIZE
-        
-        print(f"\n{'='*50}")
-        print(f"Completed alphabet: {alphabet.upper()}")
-        print(f"Total partners for this alphabet: {self.current_alphabet_count}")
-        print(f"Overall total: {self.processed_count}")
-        print(f"{'='*50}\n")
+            f.write(company_id + '\n')
 
     async def run(self):
         """Main execution method."""
-        print("\nStarting Azure Partner Directory scraping...")
+        print("Starting Azure Partner Directory scraping...")
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=False)
             page = await browser.new_page()
 
             for alphabet in 'abcdefghijklmnopqrstuvwxyz':
-                await self.process_single_alphabet(page, alphabet)
-                await asyncio.sleep(5) 
+                await self.search_appsource_alphabets(page, alphabet)
 
-            await browser.close()
-            print("\nScraping completed!")
-            print(f"Total partners processed across all alphabets: {self.processed_count}")
+                page_offset = 0
+                while page_offset <= 90:  
+                    print(f"Fetching batch at offset {page_offset} for alphabet '{alphabet}'...")
+                    company_ids = await self.fetch_batch(page_offset)
+                    
+                    if not company_ids:
+                        print(f"No more companies to process for alphabet '{alphabet}'.")
+                        break
+                    
+                    print(f"Processing batch of {len(company_ids)} companies for alphabet '{alphabet}'...")
+                    await self.process_batch(company_ids, alphabet)
+                    
+                    print(f"Completed batch for alphabet '{alphabet}'. Total processed: {self.processed_count}")
+                    page_offset += PAGE_SIZE
+
+            print(f"Scraping completed. Total partners processed: {self.processed_count}")
+            await browser.close()  
 
 if __name__ == "__main__":
     scraper = AzurePartnerScraper()
