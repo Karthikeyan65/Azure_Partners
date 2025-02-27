@@ -2,7 +2,7 @@ import requests
 import pymongo
 from datetime import datetime
 
-client = pymongo.MongoClient("mongodb://localhost:27017/")
+client = pymongo.MongoClient("mongodb+srv://jeniferjasper165:8NuZuh79hoZqY44t@scraped-data.1hmas.mongodb.net/?retryWrites=true&w=majority&appName=Scraped-data")
 db = client["azure_partners_db"]
 collection = db["azure_info"]
 
