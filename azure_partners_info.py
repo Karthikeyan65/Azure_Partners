@@ -34,39 +34,41 @@ def fetch_partners(page_offset, location, country_code):
 
 def process_and_store(partner, location, country_code):
     company_id = partner.get("partnerId", "Not available")
-    if collection.find_one({"company_id": company_id, "Country_Code": country_code}):
-        print(f"Skipping duplicate entry: {partner.get('name', 'Unknown')} in {location} ({country_code})")
-        return
+    existing_entry = collection.find_one({"company_id": company_id})
     
-    data = {
-        "company_id": company_id,
-        "Name": partner.get("name", "Not available"),
-        "Description": partner.get("description", "Not available"),
-        "Linkedin": partner.get("linkedInOrganizationProfile", "Not available"),
-        "Industry_focus": partner.get("industryFocus", "Not available"),
-        "Logo": partner.get("logo", "Not available"),
-        "Products": partner.get("product", "Not available"),
-        "Services": partner.get("serviceType", "Not available"),
-        "Solutions": partner.get("solutions", "Not available"),
-        "Program_Qualifications": partner.get("programQualificationsMsp", "Not available"),
-        "Competency_Summary": partner.get("competencySummary", "Not available"),
-        "Target_company_sizes": partner.get("targetCustomerCompanySizes", "Not available"),
-        "Location": location,
-        "Country_Code": country_code,
-        "Last_modified": datetime.now()
-    }
-    
-    collection.update_one({"company_id": data["company_id"], "Country_Code": country_code}, {"$set": data}, upsert=True)
-    print(f"Stored/Updated: {data['Name']} in {location} ({country_code})")
+    if existing_entry:
+        locations = existing_entry.get("Locations", [])
+        if location not in locations:
+            locations.append(location)
+        
+        collection.update_one(
+            {"company_id": company_id},
+            {"$set": {"Locations": locations, "Last_modified": datetime.now()}}
+        )
+        print(f"Updated: {partner.get('name', 'Unknown')} - Added new location: {location}")
+    else:
+        data = {
+            "company_id": company_id,
+            "Name": partner.get("name", "Not available"),
+            "Description": partner.get("description", "Not available"),
+            "Linkedin": partner.get("linkedInOrganizationProfile", "Not available"),
+            "Industry_focus": partner.get("industryFocus", "Not available"),
+            "Logo": partner.get("logo", "Not available"),
+            "Products": partner.get("product", "Not available"),
+            "Services": partner.get("serviceType", "Not available"),
+            "Solutions": partner.get("solutions", "Not available"),
+            "Program_Qualifications": partner.get("programQualificationsMsp", "Not available"),
+            "Competency_Summary": partner.get("competencySummary", "Not available"),
+            "Target_company_sizes": partner.get("targetCustomerCompanySizes", "Not available"),
+            "Locations": [location],
+            "Last_modified": datetime.now()
+        }
+        
+        collection.insert_one(data)
+        print(f"Stored: {data['Name']} in {location} ({country_code})")
 
 if __name__ == "__main__":
-    processed_countries = set()
-    
     for location, country_code in COUNTRY_CODES.items():
-        if country_code in processed_countries:
-            continue  
-        processed_countries.add(country_code)
-        
         for offset in range(0, 91, 18):  
             partners = fetch_partners(offset, location, country_code)
             for partner in partners:
