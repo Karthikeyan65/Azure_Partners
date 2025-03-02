@@ -2,9 +2,12 @@ import requests
 import pymongo
 from datetime import datetime
 
-client = pymongo.MongoClient("mongodb+srv://jeniferjasper165:8NuZuh79hoZqY44t@scraped-data.1hmas.mongodb.net/?retryWrites=true&w=majority&appName=Scraped-data")
+client = pymongo.MongoClient(
+    "mongodb+srv://jeniferjasper165:8NuZuh79hoZqY44t@scraped-data.1hmas.mongodb.net/?retryWrites=true&w=majority&appName=Scraped-data",
+    serverSelectionTimeoutMS=5000  
+)
 db = client["azure_partners_db"]
-collection = db["azure_info"]
+collection = db["azure_db"]
 
 BASE_URL = "https://main.prod.marketplacepartnerdirectory.azure.com/api/partners"
 
@@ -81,6 +84,7 @@ def fetch_partners(page_offset, location, country_code):
 
     if response.status_code == 200:
         return response.json().get("matchingPartners", {}).get("items", [])
+        
     else:
         print(
             f"Failed to fetch data for {location} ({country_code}) with pageOffset {page_offset}"
@@ -105,6 +109,7 @@ def process_and_store(partner, location, country_code):
             f"Updated: {partner.get('name', 'Unknown')} - Added new location: {location}"
         )
     else:
+
         data = {
             "company_id": company_id,
             "Name": partner.get("name", "Not available"),
@@ -115,10 +120,14 @@ def process_and_store(partner, location, country_code):
             "Product": partner.get("product", "Not available"),
             "Service_type": partner.get("serviceType", "Not available"),
             "Solutions": partner.get("solutions", "Not available"),
-            "Program_qualifications": partner.get(
+            "Program_qualifications_Msp": partner.get(
                 "programQualificationsMsp", "Not available"
             ),
+            "Program_qualifications_Asp": partner.get("programQualificationsAsp", "Not available"),
             "Competencies": partner.get("competencies", "Not available"),
+            "Competencies_gold": partner.get("competenciesGold", "Not available"),
+            "Competencies_silver": partner.get("competenciesSilver", "Not available"),
+            "Solutions_partner_designations": partner.get("solutionsPartnerDesignations", "Not available"),
             "Competency_summary": partner.get("competencySummary", "Not available"),
             "Locations": [location],
             "Last_modified": datetime.now(),
